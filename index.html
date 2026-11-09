@@ -8,6 +8,7 @@
 <style>
   :root { --rojo:#b3261e; --rojo-f:#fdecea; --amarillo:#fff4c2; --amarillo-b:#c99a00; --verde:#1e7d3a; --gris:#555; }
   * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
   body { margin:0; padding:16px; font-family:Segoe UI, Arial, sans-serif; font-size:20px; background:#fff; color:#111; max-width:1100px; }
   header { display:flex; flex-wrap:wrap; gap:16px; align-items:center; justify-content:space-between; margin-bottom:12px; }
   #fechas { color:var(--gris); font-size:17px; }
@@ -696,10 +697,14 @@ function pintar() {
    ARRANQUE
    ===================================================================== */
 async function cargar() {
+  try { await cargarCarpeta(); }
+  catch (e) { avisar('No se pudo leer la carpeta "' + (RAIZ && RAIZ.name) + '": ' + e.name + ' – ' + e.message, 'rojo'); mostrarConectar(true); }
+}
+async function cargarCarpeta() {
   S.avisos = []; pintarAvisos();
   $('btnConectar').hidden = true;
   try { await carpeta('entrada'); await carpeta('config'); }
-  catch (e) { avisar('Esta no es la carpeta de seguimiento: debe tener las subcarpetas "entrada" y "config".', 'rojo'); return mostrarConectar(true); }
+  catch (e) { avisar('La carpeta "' + RAIZ.name + '" no es la carpeta de seguimiento: debe tener adentro las subcarpetas "entrada" y "config".', 'rojo'); return mostrarConectar(true); }
   try { S.config = await leerConfig(); }
   catch (e) { return avisar('Falta o está dañado config/proveedores.xlsx. Avise al responsable de la configuración.', 'rojo'); }
   let nombres = []; try { nombres = await listarArchivos('entrada'); } catch (e) {}
@@ -730,12 +735,19 @@ async function cargar() {
 function mostrarConectar(nuevo) {
   const b = $('btnConectar'); b.hidden = false;
   b.onclick = async () => {
-    try {
-      const guardada = nuevo ? null : await idbGet('raiz');
-      if (guardada && (await guardada.requestPermission({ mode: 'readwrite' })) === 'granted') RAIZ = guardada;
-      else { RAIZ = await window.showDirectoryPicker({ mode: 'readwrite' }); await idbSet('raiz', RAIZ); }
-      cargar();
-    } catch (e) { /* el usuario canceló */ }
+    S.avisos = []; pintarAvisos();
+    let guardada = null;
+    if (!nuevo) { try { guardada = await idbGet('raiz'); } catch (e) {} }
+    if (guardada) { try { if ((await guardada.requestPermission({ mode: 'readwrite' })) === 'granted') { RAIZ = guardada; return cargar(); } } catch (e) {} }
+    try { RAIZ = await window.showDirectoryPicker({ mode: 'readwrite' }); }
+    catch (e) {
+      return avisar(e.name === 'AbortError'
+        ? 'No se recibió ninguna carpeta: se canceló o el navegador no permitió esa ubicación. Dé UN clic sobre la carpeta, oprima "Seleccionar carpeta" y luego "Permitir" / "Ver archivos". Si sigue igual, pruebe con una carpeta fuera de OneDrive (ej. D:\\PruebaSeguimiento). (' + e.message + ')'
+        : 'El navegador no entregó la carpeta: ' + e.name + ' – ' + e.message, 'rojo');
+    }
+    try { if ((await RAIZ.requestPermission({ mode: 'readwrite' })) !== 'granted') return avisar('No se dio permiso para editar la carpeta "' + RAIZ.name + '". Vuelva a intentar y oprima "Permitir".', 'rojo'); } catch (e) {}
+    try { await idbSet('raiz', RAIZ); } catch (e) { avisar('El navegador no deja recordar la carpeta: tendrá que elegirla cada vez que abra la herramienta. (' + e.message + ')', 'amarillo'); }
+    cargar();
   };
 }
 async function iniciar() {
