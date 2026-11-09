@@ -1,0 +1,7 @@
+{
+  "name": "pruebas-seguimiento-proveedores",
+  "private": true,
+  "description": "Pruebas automáticas de index.html (no se necesitan para usar la herramienta)",
+  "scripts": { "test": "node prueba.js", "real": "node prueba_real.js" },
+  "dependencies": { "xlsx": "0.18.5" }
+}
