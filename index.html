@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seguimiento a proveedores</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root { --rojo:#b3261e; --rojo-f:#fdecea; --amarillo:#fff4c2; --amarillo-b:#c99a00; --verde:#1e7d3a; --gris:#555; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:16px; font-family:Segoe UI, Arial, sans-serif; font-size:20px; background:#fff; color:#111; max-width:1100px; }
+  header { display:flex; flex-wrap:wrap; gap:16px; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  #fechas { color:var(--gris); font-size:17px; }
+  #fechaSimulada { color:var(--rojo); font-weight:bold; font-size:16px; }
+  details#selComp { position:relative; }
+  details#selComp summary { cursor:pointer; padding:10px 14px; border:2px solid #333; border-radius:8px; list-style:none; font-weight:bold; }
+  #listaComp { position:absolute; z-index:5; background:#fff; border:2px solid #333; border-radius:8px; padding:8px 14px; min-width:320px; }
+  #listaComp label { display:block; padding:6px 0; cursor:pointer; }
+  #listaComp input { width:22px; height:22px; vertical-align:middle; margin-right:8px; }
+  .aviso { padding:14px; border-radius:8px; margin:10px 0; font-weight:bold; }
+  .aviso.amarillo { background:var(--amarillo); border:2px solid var(--amarillo-b); }
+  .aviso.rojo { background:var(--rojo-f); border:2px solid var(--rojo); color:var(--rojo); }
+  .aviso.info { background:#eef3fb; border:2px solid #6b8fc7; }
+  section { border:2px solid #ccc; border-radius:10px; padding:12px 16px; margin:16px 0; }
+  h2 { margin:4px 0 12px; font-size:26px; }
+  button { font-size:20px; padding:10px 18px; border-radius:8px; border:2px solid #333; background:#f2f2f2; cursor:pointer; }
+  button.grande { display:block; width:100%; text-align:left; font-size:24px; padding:16px 20px; margin:8px 0; background:#25d366; border-color:#128c4a; color:#fff; font-weight:bold; }
+  button.grande:disabled { background:#bbb; border-color:#999; }
+  button.principal { background:#1f5fbf; border-color:#173f7d; color:#fff; font-weight:bold; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid #ddd; vertical-align:middle; }
+  tr.llamar td { background:var(--rojo-f); color:var(--rojo); }
+  tr.amarilla td { background:var(--amarillo); }
+  input[type=date] { font-size:19px; padding:6px; }
+  textarea { width:100%; height:170px; font-size:18px; padding:10px; border:2px solid #333; border-radius:8px; }
+  .provGrande { font-size:30px; font-weight:bold; margin:12px 0; }
+  .vacio { color:var(--gris); }
+  #btnConectar { font-size:24px; padding:18px 24px; }
+</style>
+</head>
+<body>
+<header id="cabecera" hidden>
+  <details id="selComp"><summary>¿Quién eres? <span id="selTxt"></span> ▾</summary><div id="listaComp"></div></details>
+  <div id="fechas"></div>
+</header>
+<div id="avisos"></div>
+<button id="btnConectar" hidden>Abrir la carpeta de seguimiento</button>
+<main id="principal" hidden>
+  <section id="b1"><h2>1. HOY TOCA ENVIAR</h2><div id="envios"></div></section>
+  <section id="b2"><h2>2. HOY TOCA LLAMAR</h2><div id="llamadas"></div></section>
+  <section id="b3"><h2>3. PEGAR RESPUESTA</h2>
+    <textarea id="pegado" placeholder="Pegue aquí lo que copió de WhatsApp Web"></textarea>
+    <p><button id="btnLeer" class="principal">Leer</button></p>
+    <div id="lectura"></div>
+  </section>
+</main>
+
+<script>
+'use strict';
+/* =====================================================================
+   PARÁMETROS (cambiar aquí si cambia la operación)
+   ===================================================================== */
+const PROVEEDORES_PILOTO = ['BANOS BRASILIA SAS','NESTOR BRAVO S.A','NUVANT SAS','AGOFER S A S','ROPIM S.A.S','MAZDEL PLAZAS RODRIGUEZ S EN C','AYCO LTDA'];
+const PREFIJO_OC = 'OC-';
+const HORIZONTE_DIAS = 28;
+const MAX_LINEAS_MENSAJE = 15;
+const DIAS_HABILES_SEGUIMIENTO = 3;
+const ENVIOS_ANTES_DE_LLAMAR = 2;
+const INDICATIVO = '57';
+
+const HOJA_EXPLOSION = 'Explosión';
+const COL_EXPLOSION = { item:'Item', fecha:'Fecha Planeación', necesidad:'Cant Penditiente - Inventario', gestion:'ITEMS GESTION.GESTIÓN', excluido:'Excluido' };
+const COL_OC = { orden:'Nro orden', proveedor:'Razón social proveedor', item:'Item', desc:'Desc. item', um:'U.M.', pendiente:'Cant. pendiente', solicitud:'Nro solicitud' };
+const RE_ARCHIVO_OC = /^OC[ _](\d{2})(\d{2})(\d{4})\.txt$/i;
+const RE_ARCHIVO_EXP = /^ABASTECIMIENTO[ _](\d{2})(\d{2})(\d{4})\.xlsx$/i;
+
+const RUTA_CONFIG = 'config/proveedores.xlsx';
+const RUTA_REGISTRO = 'registro/fechas_prometidas.xlsx';
+const RUTA_CACHE = 'registro/cache/explosion.json';
+
+/* Mensaje de WhatsApp. {contacto} {PROVEEDOR} {LINEAS} {OC_EJEMPLO} */
+const MENSAJE =
+`Buenos días {contacto}, le escribe Compras Busscar. Estas son las entregas pendientes de {PROVEEDOR}:
+{LINEAS}
+¿Se mantienen estas fechas? Puede responder con sus palabras, por ejemplo:
+"Todo igual" · "La {OC_EJEMPLO} llega el 25 de noviembre" · "El 2 de la {OC_EJEMPLO} llega el 21" · "La {OC_EJEMPLO} ya la entregamos"
+
+Gracias. Este seguimiento no reemplaza la facturación en la plataforma de proveedores.`;
+const LINEA_MENSAJE = '{N}. {DESC} (cód. {ITEM}) · {CANT} {UM} · Requerida {REQ} · {CONF}';
+
+/* Columnas del archivo registro/fechas_prometidas.xlsx */
+const COLS_LINEAS = [
+  ['clave','clave'],['oc','OC'],['item','ítem'],['descripcion','descripción'],['proveedor','proveedor'],['comprador','comprador'],
+  ['cant','cant. pendiente'],['fecha_requerida','fecha requerida'],['fecha_prometida','fecha prometida'],['estado','estado'],
+  ['envios','envíos sin respuesta'],['ultimo_envio','último envío'],['ultima_respuesta','última respuesta'],
+  ['seguimiento_hecho','seguimiento 3 días hecho'],['actualizado','actualizado']];
+const COLS_HIST = [['id','id'],['fecha','fecha'],['hora','hora'],['comprador','comprador'],['tipo','tipo'],['proveedor','proveedor'],['claves','claves'],['detalle','detalle']];
+
+/* =====================================================================
+   UTILIDADES
+   ===================================================================== */
+const $ = id => document.getElementById(id);
+const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const MESES3 = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+const pad = n => String(n).padStart(2,'0');
+const norm = s => String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+const soloDigitos = s => String(s == null ? '' : s).replace(/\D/g,'');
+const sinCeros = s => String(s == null ? '' : s).trim().replace(/^0+(?=\d)/,'');
+const numOC = oc => sinCeros(String(oc).replace(/^[A-Za-z]+-/,''));
+const esperar = () => new Promise(r => setTimeout(r, 30));
+
+const PARAMS = new URLSearchParams(location.search);
+const FECHA_SIMULADA = /^\d{4}-\d{2}-\d{2}$/.test(PARAMS.get('hoy') || '') ? PARAMS.get('hoy') : null;
+function isoDe(d) { return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()); }
+function hoy() { return FECHA_SIMULADA || isoDe(new Date()); }
+function ahora() { const d = new Date(); return hoy() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) + '.' + String(d.getMilliseconds()).padStart(3,'0'); }
+function aFecha(iso) { const [a,m,d] = iso.slice(0,10).split('-').map(Number); return new Date(a, m-1, d, 12); }
+function sumarDias(iso, n) { const d = aFecha(iso); d.setDate(d.getDate() + n); return isoDe(d); }
+function esHabil(iso) { const g = aFecha(iso).getDay(); return g !== 0 && g !== 6; }
+function sumarHabiles(iso, n) { let d = iso.slice(0,10); while (n > 0) { d = sumarDias(d, 1); if (esHabil(d)) n--; } return d; }
+function fechaCorta(iso) { const d = aFecha(iso); return d.getDate() + ' ' + MESES3[d.getMonth()]; }
+function ddmm(iso) { return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) : ''; }
+function ddmmaaaa(iso) { return iso ? iso.slice(8,10) + '/' + iso.slice(5,7) + '/' + iso.slice(0,4) : ''; }
+function serialAIso(n) { const d = new Date(Math.round((n - 25569) * 864e5)); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth()+1) + '-' + pad(d.getUTCDate()); }
+function valorFecha(v) {
+  if (v == null || v === '') return '';
+  if (v instanceof Date) return isoDe(v);
+  if (typeof v === 'number') return v > 30000 ? serialAIso(v) : '';
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})(.*)$/); if (m) return s;
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (m) return m[3] + '-' + pad(m[2]) + '-' + pad(m[1]);
+  return s;
+}
+function fechaValida(a, m, d) { const x = new Date(a, m-1, d, 12); return x.getFullYear() === a && x.getMonth() === m-1 && x.getDate() === d; }
+function requeridaEfectiva(l) { return l.fecha_requerida && l.fecha_requerida > hoy() ? l.fecha_requerida : hoy(); }
+function numeroCO(s) { const t = String(s == null ? '' : s).trim().replace(/\./g,'').replace(',','.'); const n = Number(t); return isFinite(n) ? n : NaN; }
+function fmtCant(n) { return Number(n).toLocaleString('es-CO', { maximumFractionDigits: 2 }); }
+
+/* =====================================================================
+   CARPETA (File System Access API)
+   ===================================================================== */
+let RAIZ = null;
+function idb() { return new Promise((ok, mal) => { const r = indexedDB.open('seguimiento_proveedores', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => ok(r.result); r.onerror = () => mal(r.error); }); }
+async function idbGet(k) { const db = await idb(); return new Promise(ok => { const r = db.transaction('kv').objectStore('kv').get(k); r.onsuccess = () => ok(r.result); r.onerror = () => ok(null); }); }
+async function idbSet(k, v) { const db = await idb(); return new Promise(ok => { const t = db.transaction('kv','readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = () => ok(); t.onerror = () => ok(); }); }
+
+async function carpeta(ruta, crear) { let h = RAIZ; for (const p of ruta.split('/').filter(Boolean)) h = await h.getDirectoryHandle(p, { create: !!crear }); return h; }
+async function leerArchivo(ruta) { const p = ruta.split('/'); const n = p.pop(); const d = await carpeta(p.join('/')); return (await d.getFileHandle(n)).getFile(); }
+async function existeArchivo(ruta) { try { await leerArchivo(ruta); return true; } catch (e) { return false; } }
+async function escribirArchivo(ruta, datos) { const p = ruta.split('/'); const n = p.pop(); const d = await carpeta(p.join('/'), true); const fh = await d.getFileHandle(n, { create: true }); const w = await fh.createWritable(); await w.write(datos); await w.close(); }
+async function listarArchivos(ruta) { const d = await carpeta(ruta); const out = []; for await (const [n, h] of d.entries()) if (h.kind === 'file') out.push(n); return out; }
+async function leerJSON(ruta) { try { return JSON.parse(await (await leerArchivo(ruta)).text()); } catch (e) { return null; } }
+
+/* =====================================================================
+   ESTADO EN MEMORIA
+   ===================================================================== */
+const S = {
+  config: [],          // filas de config/proveedores.xlsx
+  oc: [],              // filas del archivo de OC usado
+  ocInfo: null, expInfo: null,
+  items: {},           // explosión liviana: item -> [fechaPlaneacionMasCercana, excluido]
+  alcance: new Map(),  // clave -> fila de OC en seguimiento hoy
+  reg: { lineas: new Map(), historial: [] },
+  avisos: [],
+  lectura: null,
+};
+
+function avisar(texto, tipo) { S.avisos.push({ texto, tipo }); pintarAvisos(); }
+function pintarAvisos() {
+  const c = $('avisos'); c.innerHTML = '';
+  for (const a of S.avisos) { const d = document.createElement('div'); d.className = 'aviso ' + (a.tipo || 'amarillo'); d.textContent = a.texto; c.appendChild(d); }
+}
+function compradoresSeleccionados() { try { return JSON.parse(localStorage.getItem('compradores') || '[]'); } catch (e) { return []; } }
+function guardarSeleccion(l) { try { localStorage.setItem('compradores', JSON.stringify(l)); } catch (e) {} }
+function textoComprador() { return compradoresSeleccionados().join(' / '); }
+function cfgProveedor(p) { return S.config.find(c => norm(c.proveedor) === norm(p)); }
+
+function historial(tipo, proveedor, claves, detalle) {
+  const t = ahora();
+  S.reg.historial.push({ id: t + '-' + Math.random().toString(36).slice(2, 8), fecha: t.slice(0,10), hora: t.slice(11,19), comprador: textoComprador(), tipo, proveedor: proveedor || '', claves: claves ? JSON.stringify(claves) : '', detalle: detalle || '' });
+}
+function tocar(l) { l.actualizado = ahora(); }
+
+/* =====================================================================
+   LECTURA DE ARCHIVOS
+   ===================================================================== */
+async function leerConfig() {
+  const f = await leerArchivo(RUTA_CONFIG);
+  const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+  const filas = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
+  return filas.map(r => { const o = {}; for (const k in r) o[norm(k).replace(/ /g,'_')] = String(r[k]).trim(); return o; })
+    .filter(r => r.proveedor);
+}
+
+function leerTextoOC(texto) {
+  const lineas = texto.split(/\r?\n/);
+  const enc = lineas[0].split('\t').map(s => s.trim());
+  const idx = {};
+  for (const k in COL_OC) { idx[k] = enc.findIndex(h => norm(h) === norm(COL_OC[k])); if (idx[k] < 0) throw new Error('falta la columna "' + COL_OC[k] + '"'); }
+  const out = [];
+  for (let i = 1; i < lineas.length; i++) {
+    const c = lineas[i].split('\t');
+    if (c.some(x => norm(x) === 'gran total')) continue;
+    const orden = (c[idx.orden] || '').trim();
+    if (!orden) continue;
+    const pend = numeroCO(c[idx.pendiente]);
+    if (isNaN(pend)) throw new Error('cantidad pendiente ilegible en la fila ' + (i+1));
+    out.push({ orden, proveedor: (c[idx.proveedor] || '').trim(), item: (c[idx.item] || '').trim(), desc: (c[idx.desc] || '').trim(),
+      um: (c[idx.um] || '').trim(), pendiente: pend, solicitud: (c[idx.solicitud] || '').trim() });
+  }
+  if (!out.length) throw new Error('el archivo no trae líneas');
+  return out;
+}
+async function leerOC(file) { return leerTextoOC(new TextDecoder('windows-1252').decode(await file.arrayBuffer())); }
+
+async function leerExplosion(file) {
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', dense: true, sheets: HOJA_EXPLOSION, cellFormula: false, cellHTML: false, cellText: false, cellStyles: false });
+  const ws = wb.Sheets[HOJA_EXPLOSION];
+  if (!ws) throw new Error('no tiene la hoja "' + HOJA_EXPLOSION + '"');
+  const filas = ws['!data'] || ws;
+  if (!Array.isArray(filas) || !filas.length) throw new Error('la hoja está vacía');
+  const val = c => (c == null ? null : (typeof c === 'object' && 'v' in c ? c.v : c));
+  const enc = (filas[0] || []).map(c => norm(val(c)));
+  const idx = {};
+  for (const k in COL_EXPLOSION) { idx[k] = enc.indexOf(norm(COL_EXPLOSION[k])); if (idx[k] < 0) throw new Error('falta la columna "' + COL_EXPLOSION[k] + '"'); }
+  const items = {}; let n = 0;
+  for (let r = 1; r < filas.length; r++) {
+    const f = filas[r]; if (!f) continue;
+    const it = val(f[idx.item]); if (it == null || it === '') continue;
+    const k = sinCeros(typeof it === 'number' ? String(Math.round(it)) : String(it).trim());
+    const e = items[k] || (items[k] = [null, 0]); n++;
+    const g = val(f[idx.gestion]), x = val(f[idx.excluido]);
+    if ((g != null && String(g).trim() !== '') || (x != null && String(x).trim() !== '')) e[1] = 1;
+    const nec = Number(val(f[idx.necesidad]));
+    if (nec > 0) { const fe = valorFecha(val(f[idx.fecha])); if (/^\d{4}-\d{2}-\d{2}$/.test(fe) && (!e[0] || fe < e[0])) e[0] = fe; }
+  }
+  if (!n) throw new Error('no trae ítems');
+  return items;
+}
+
+function candidatos(nombres, re) {
+  return nombres.map(n => { const m = n.match(re); return m && fechaValida(+m[3], +m[2], +m[1]) ? { nombre: n, iso: m[3] + '-' + m[2] + '-' + m[1] } : null; })
+    .filter(Boolean).sort((a, b) => b.iso.localeCompare(a.iso) || b.nombre.localeCompare(a.nombre));
+}
+
+/* Usa el archivo más reciente; si está dañado, el anterior válido */
+async function elegirOC(nombres) {
+  const danados = [];
+  for (const c of candidatos(nombres, RE_ARCHIVO_OC)) {
+    try { const filas = await leerOC(await leerArchivo('entrada/' + c.nombre)); return { usado: c, filas, danados }; }
+    catch (e) { danados.push({ ...c, motivo: e.message }); }
+  }
+  return { usado: null, danados };
+}
+async function elegirExplosion(nombres) {
+  const danados = [];
+  let cache = await leerJSON(RUTA_CACHE) || { danados: [] };
+  if (!Array.isArray(cache.danados)) cache.danados = [];
+  for (const c of candidatos(nombres, RE_ARCHIVO_EXP)) {
+    let file; try { file = await leerArchivo('entrada/' + c.nombre); } catch (e) { continue; }
+    const firma = c.nombre + '|' + file.size + '|' + file.lastModified;
+    if (cache.firma === firma && cache.items) { window.__fuenteExplosion = 'cache'; return { usado: c, items: cache.items, danados }; }
+    if (cache.danados.includes(firma)) { danados.push({ ...c, motivo: 'dañada (revisada antes)' }); continue; }
+    try {
+      $('avisos').insertAdjacentHTML('beforeend', '<div class="aviso info" id="cargando">Cargando la explosión nueva (' + c.nombre + '). Puede tardar hasta 30 segundos; solo pasa una vez por archivo.</div>');
+      await esperar();
+      const items = await leerExplosion(file);
+      cache = { firma, fuente: c.nombre, generado: ahora(), items, danados: cache.danados };
+      try { await escribirArchivo(RUTA_CACHE, JSON.stringify(cache)); } catch (e) {}
+      window.__fuenteExplosion = 'archivo';
+      return { usado: c, items, danados };
+    } catch (e) {
+      danados.push({ ...c, motivo: e.message });
+      cache.danados.push(firma);
+      try { await escribirArchivo(RUTA_CACHE, JSON.stringify(cache)); } catch (e2) {}
+    } finally { const x = $('cargando'); if (x) x.remove(); }
+  }
+  return { usado: null, danados };
+}
+
+/* =====================================================================
+   REGISTRO CONSOLIDADO (lectura, fusión, escritura segura)
+   ===================================================================== */
+function filaALinea(r) {
+  const l = {}; for (const [k, h] of COLS_LINEAS) l[k] = r[h] == null ? '' : r[h];
+  for (const k of ['fecha_requerida','fecha_prometida','ultimo_envio','ultima_respuesta']) l[k] = valorFecha(l[k]);
+  l.envios = Number(l.envios) || 0; l.cant = Number(l.cant) || 0;
+  for (const k of ['clave','oc','item','actualizado','estado','seguimiento_hecho']) l[k] = String(l[k]);
+  return l;
+}
+async function leerRegistro() {
+  const reg = { lineas: new Map(), historial: [] };
+  let f; try { f = await leerArchivo(RUTA_REGISTRO); } catch (e) { return reg; }
+  const wb = XLSX.read(await f.arrayBuffer(), { type: 'array' });
+  if (wb.Sheets.lineas) for (const r of XLSX.utils.sheet_to_json(wb.Sheets.lineas, { defval: '' })) { const l = filaALinea(r); if (l.clave) reg.lineas.set(l.clave, l); }
+  if (wb.Sheets.historial) for (const r of XLSX.utils.sheet_to_json(wb.Sheets.historial, { defval: '' })) { const h = {}; for (const [k, t] of COLS_HIST) h[k] = String(r[t] == null ? '' : r[t]); reg.historial.push(h); }
+  return reg;
+}
+function libroRegistro(reg) {
+  const wb = XLSX.utils.book_new();
+  const lin = [COLS_LINEAS.map(c => c[1])];
+  for (const l of [...reg.lineas.values()].sort((a, b) => a.proveedor.localeCompare(b.proveedor) || a.oc.localeCompare(b.oc) || a.item.localeCompare(b.item)))
+    lin.push(COLS_LINEAS.map(([k]) => (k === 'envios' || k === 'cant') ? Number(l[k]) || 0 : String(l[k] == null ? '' : l[k])));
+  const his = [COLS_HIST.map(c => c[1])];
+  for (const h of reg.historial) his.push(COLS_HIST.map(([k]) => h[k]));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(lin), 'lineas');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(his), 'historial');
+  return wb;
+}
+function fusionar(mio, disco) {
+  const lineas = new Map(disco.lineas);
+  for (const [k, l] of mio.lineas) { const d = lineas.get(k); if (!d || String(l.actualizado) >= String(d.actualizado)) lineas.set(k, l); }
+  const ids = new Set(disco.historial.map(h => h.id));
+  const historial = disco.historial.concat(mio.historial.filter(h => !ids.has(h.id)));
+  historial.sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return { lineas, historial };
+}
+async function guardar() {
+  try {
+    const disco = await leerRegistro();
+    const r = fusionar(S.reg, disco);
+    const datos = XLSX.write(libroRegistro(r), { type: 'array', bookType: 'xlsx' });
+    await escribirArchivo(RUTA_REGISTRO, new Blob([datos]));
+    S.reg = r;
+    return true;
+  } catch (e) {
+    avisar('NO SE GUARDÓ. Cierre el archivo fechas_prometidas.xlsx si alguien lo tiene abierto y vuelva a intentar. (' + e.message + ')', 'rojo');
+    return false;
+  }
+}
+async function respaldoDiario() {
+  const destino = 'registro/respaldo/fechas_prometidas_' + hoy().replace(/-/g,'') + '.xlsx';
+  try {
+    if (await existeArchivo(destino)) return;
+    const f = await leerArchivo(RUTA_REGISTRO);
+    await escribirArchivo(destino, new Blob([await f.arrayBuffer()]));
+  } catch (e) { /* sin consolidado todavía */ }
+}
+
+/* =====================================================================
+   SINCRONIZAR CON LOS ARCHIVOS DE ENTRADA
+   ===================================================================== */
+function claveDe(r) { return r.orden + '|' + r.item + '|' + r.solicitud; }
+function sincronizar() {
+  const h = hoy(), limite = sumarDias(h, HORIZONTE_DIAS);
+  const piloto = new Set(PROVEEDORES_PILOTO.map(norm));
+  const abiertas = new Set();
+  S.alcance = new Map();
+  let cambios = 0;
+  for (const r of S.oc) {
+    if (!(r.pendiente > 0) || !r.orden.startsWith(PREFIJO_OC) || !piloto.has(norm(r.proveedor))) continue;
+    const clave = claveDe(r); abiertas.add(clave);
+    const e = S.items[sinCeros(r.item)];
+    if (!e || e[1] || !e[0]) continue;                       // sin necesidad o excluido
+    const efectiva = e[0] > h ? e[0] : h;
+    if (efectiva > limite) continue;                          // fuera del horizonte
+    S.alcance.set(clave, r);
+    const comprador = (cfgProveedor(r.proveedor) || {}).comprador || '';
+    let l = S.reg.lineas.get(clave);
+    if (!l || l.estado === 'CERRADA') {
+      l = { clave, oc: r.orden, item: r.item, descripcion: r.desc, proveedor: r.proveedor, comprador, cant: r.pendiente, fecha_requerida: e[0],
+        fecha_prometida: '', estado: 'POR ENVIAR', envios: 0, ultimo_envio: '', ultima_respuesta: '', seguimiento_hecho: 'NO', actualizado: '' };
+      tocar(l); S.reg.lineas.set(clave, l); cambios++;
+      historial('CAMBIO', r.proveedor, [clave], 'Línea nueva en seguimiento. Requerida ' + ddmmaaaa(e[0]));
+      continue;
+    }
+    let toco = false;
+    if (l.fecha_requerida !== e[0]) {
+      historial('CAMBIO', r.proveedor, [clave], 'Fecha requerida cambió de ' + ddmmaaaa(l.fecha_requerida) + ' a ' + ddmmaaaa(e[0]));
+      l.fecha_requerida = e[0];
+      if (l.estado !== 'ENTREGADO') { l.estado = 'POR ENVIAR'; l.envios = 0; l.seguimiento_hecho = 'NO'; }
+      toco = true;
+    }
+    if (Number(l.cant) !== r.pendiente) { l.cant = r.pendiente; toco = true; }
+    if (l.comprador !== comprador) { l.comprador = comprador; toco = true; }
+    if (toco) { tocar(l); cambios++; }
+  }
+  for (const l of S.reg.lineas.values()) {
+    if (l.estado !== 'CERRADA' && !abiertas.has(l.clave)) {
+      historial('CAMBIO', l.proveedor, [l.clave], 'Cerrada: ya no aparece pendiente en ' + S.ocInfo.nombre + ' (estado anterior ' + l.estado + ')');
+      l.estado = 'CERRADA'; tocar(l); cambios++;
+    }
+    if (l.estado === 'ENVIADO' && l.envios >= ENVIOS_ANTES_DE_LLAMAR && h >= sumarHabiles(l.ultimo_envio, 1)) {
+      l.estado = 'LLAMAR'; tocar(l); cambios++;
+      historial('CAMBIO', l.proveedor, [l.clave], 'LLAMAR: ' + l.envios + ' envíos sin respuesta');
+    }
+  }
+  return cambios;
+}
+
+/* =====================================================================
+   REGLAS DE ENVÍO
+   ===================================================================== */
+function tocaEnviar(l) {
+  const h = hoy();
+  if (!S.alcance.has(l.clave)) return false;
+  if (l.estado === 'POR ENVIAR') return true;
+  if (l.estado === 'ENVIADO' && l.envios < ENVIOS_ANTES_DE_LLAMAR && l.ultimo_envio && h >= sumarHabiles(l.ultimo_envio, 1)) return true;
+  if (l.estado === 'CONFIRMADO' && l.seguimiento_hecho !== 'SI' && l.ultima_respuesta && h >= sumarHabiles(l.ultima_respuesta, DIAS_HABILES_SEGUIMIENTO)) return true;
+  return false;
+}
+function proveedoresDelComprador() {
+  const sel = new Set(compradoresSeleccionados().map(norm));
+  return S.config.filter(c => sel.has(norm(c.comprador)));
+}
+function envioDeHoy() {
+  const out = [];
+  for (const c of proveedoresDelComprador()) {
+    const todas = [...S.reg.lineas.values()].filter(l => norm(l.proveedor) === norm(c.proveedor));
+    if (todas.some(l => l.ultimo_envio && l.ultimo_envio.slice(0,10) === hoy())) continue;   // un mensaje por proveedor por día
+    const lin = todas.filter(tocaEnviar).sort((a, b) => requeridaEfectiva(a).localeCompare(requeridaEfectiva(b)) || a.oc.localeCompare(b.oc) || a.item.localeCompare(b.item)).slice(0, MAX_LINEAS_MENSAJE);
+    if (lin.length) out.push({ cfg: c, lineas: ordenMensaje(lin) });
+  }
+  return out;
+}
+/* Agrupa por OC (la OC con la fecha más cercana primero) y numera dentro de cada OC */
+function ordenMensaje(lin) {
+  const grupos = new Map();
+  for (const l of lin) { if (!grupos.has(l.oc)) grupos.set(l.oc, []); grupos.get(l.oc).push(l); }
+  return [...grupos.values()].flat();
+}
+function construirMensaje(cfg, lineas) {
+  let txt = '', ocActual = null, n = 0;
+  for (const l of lineas) {
+    if (l.oc !== ocActual) { ocActual = l.oc; n = 0; txt += '\nOC ' + numOC(l.oc) + '\n'; }
+    n++;
+    const o = S.alcance.get(l.clave) || {};
+    const req = requeridaEfectiva(l);
+    const desc = String(l.descripcion || o.desc || '').replace(/\s+/g,' ').trim().slice(0, 40).trim();
+    txt += LINEA_MENSAJE.replace('{N}', n).replace('{DESC}', desc).replace('{ITEM}', l.item).replace('{CANT}', fmtCant(l.cant))
+      .replace('{UM}', String(o.um || '').toLowerCase()).replace('{REQ}', req === hoy() ? 'hoy' : fechaCorta(req))
+      .replace('{CONF}', l.fecha_prometida ? 'Confirmada: ' + fechaCorta(l.fecha_prometida) : 'Sin confirmar') + '\n';
+  }
+  return MENSAJE.replace('{contacto}', cfg.contacto || '').replace('{PROVEEDOR}', cfg.proveedor).replace('{LINEAS}', txt)
+    .split('{OC_EJEMPLO}').join(numOC(lineas[0].oc));
+}
+function telefono(cfg) { let t = soloDigitos(cfg.celular); if (t.length === 10) t = INDICATIVO + t; return t; }
+
+async function enviar(grupo, boton) {
+  const msg = construirMensaje(grupo.cfg, grupo.lineas);
+  window.open('https://wa.me/' + telefono(grupo.cfg) + '?text=' + encodeURIComponent(msg), '_blank');
+  boton.disabled = true;
+  const t = ahora();
+  for (const l of grupo.lineas) {
+    if (l.estado === 'CONFIRMADO') { l.seguimiento_hecho = 'SI'; l.envios = 1; }
+    else l.envios = l.estado === 'ENVIADO' ? l.envios + 1 : 1;
+    l.estado = 'ENVIADO'; l.ultimo_envio = t; l.actualizado = t;
+  }
+  historial('ENVÍO', grupo.cfg.proveedor, grupo.lineas.map(l => l.clave), msg);
+  await guardar(); pintar();
+}
+
+/* =====================================================================
+   LLAMADAS
+   ===================================================================== */
+function llamadasDeHoy() {
+  const provs = new Set(proveedoresDelComprador().map(c => norm(c.proveedor)));
+  return [...S.reg.lineas.values()].filter(l => l.estado === 'LLAMAR' && provs.has(norm(l.proveedor)))
+    .sort((a, b) => a.proveedor.localeCompare(b.proveedor) || a.oc.localeCompare(b.oc));
+}
+async function guardarAcordada(l, fecha) {
+  const t = ahora();
+  l.fecha_prometida = fecha; l.estado = 'CONFIRMADO'; l.envios = 0; l.ultima_respuesta = t; l.seguimiento_hecho = 'SI'; l.actualizado = t;
+  historial('CAMBIO', l.proveedor, [l.clave], 'Fecha acordada por llamada: ' + ddmmaaaa(fecha));
+  await guardar(); pintar();
+}
+
+/* =====================================================================
+   LECTURA DE LA RESPUESTA (reglas fijas, sin IA)
+   ===================================================================== */
+const RE_ENCABEZADO = /^\[(\d{1,2}):(\d{2})(?:\s*([ap])\.?\s*m\.?)?,\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})\]\s*([^:]+?):\s?(.*)$/i;
+function separarMensajes(texto) {
+  const msgs = []; let actual = null;
+  for (const linea of texto.split(/\r?\n/)) {
+    const m = linea.trim().match(RE_ENCABEZADO);
+    if (m) {
+      let hh = +m[1]; const ap = (m[3] || '').toLowerCase();
+      if (ap === 'p' && hh < 12) hh += 12; if (ap === 'a' && hh === 12) hh = 0;
+      let a = +m[6]; if (a < 100) a += 2000;
+      actual = { fecha: a + '-' + pad(m[5]) + '-' + pad(m[4]) + ' ' + pad(hh) + ':' + m[2], remitente: m[7].trim(), texto: m[8] };
+      msgs.push(actual);
+    } else if (actual) actual.texto += '\n' + linea;
+  }
+  return msgs;
+}
+function proveedorDeRemitente(rem) {
+  const n = norm(rem), d = soloDigitos(rem);
+  return S.config.find(c => (c.nombre_whatsapp && norm(c.nombre_whatsapp) === n) ||
+    (d.length >= 7 && soloDigitos(c.celular).length >= 7 && d.slice(-10) === soloDigitos(c.celular).slice(-10)));
+}
+
+const MES_RE = '(enero|ene|febrero|feb|marzo|mar|abril|abr|mayo|may|junio|jun|julio|jul|agosto|ago|septiembre|setiembre|sept|sep|set|octubre|oct|noviembre|nov|diciembre|dic)';
+function mesNum(t) { const p = t.slice(0,3); return { ene:1,feb:2,mar:3,abr:4,may:5,jun:6,jul:7,ago:8,sep:9,set:9,oct:10,nov:11,dic:12 }[p]; }
+function armarFecha(d, m, a) {
+  const h = hoy();
+  if (!a) { a = +h.slice(0,4); const f = a + '-' + pad(m) + '-' + pad(d); if (fechaValida(a, m, d) && f < sumarDias(h, -60)) a++; }
+  else if (a < 100) a += 2000;
+  return fechaValida(a, m, d) ? a + '-' + pad(m) + '-' + pad(d) : null;
+}
+/* Devuelve { fecha, vaga, resto } */
+function extraerFecha(n) {
+  let fecha = null, m;
+  const quitar = s => { n = n.replace(s, ' '); };
+  if ((m = n.match(/\b(\d{1,2})\s*[\/\-]\s*(\d{1,2})(?:\s*[\/\-]\s*(\d{2,4}))?\b/))) { fecha = armarFecha(+m[1], +m[2], m[3] ? +m[3] : 0); quitar(m[0]); }
+  else if ((m = n.match(new RegExp('\\b(\\d{1,2})\\s+(?:de\\s+)?' + MES_RE + '\\.?(?:\\s+(?:de\\s+|del\\s+)?(\\d{4}))?\\b')))) { fecha = armarFecha(+m[1], mesNum(m[2]), m[3] ? +m[3] : 0); quitar(m[0]); }
+  else if (/\bpasado\s+manana\b/.test(n)) { return { fecha: null, vaga: true, resto: n }; }
+  else if ((m = n.match(/\bmanana\b/))) { fecha = sumarDias(hoy(), 1); quitar(m[0]); }
+  else if ((m = n.match(/\bhoy\b/))) { fecha = hoy(); quitar(m[0]); }
+  else if ((m = n.match(/\b(?:el|para el|el dia|dia)\s+(\d{1,2})\b(?!\s*(?:de\s|\/|-))/))) {
+    const d = +m[1], h = hoy(); let a = +h.slice(0,4), mes = +h.slice(5,7);
+    if (d < +h.slice(8,10)) { mes++; if (mes > 12) { mes = 1; a++; } }
+    fecha = fechaValida(a, mes, d) ? a + '-' + pad(mes) + '-' + pad(d) : null; quitar(m[0]);
+  }
+  const vaga = !fecha && /\b(semana|proxima|proximo|fin de mes|finales|principios|quincena|mes|lunes|martes|miercoles|jueves|viernes|sabado|domingo|pronto|no sabemos|por confirmar|pendiente)\b/.test(n);
+  return { fecha, vaga, resto: n };
+}
+
+function interpretar(texto, ctx) {
+  const res = new Map();        // clave -> { tipo:'fecha'|'entregado'|'vaga'|'mantiene', fecha }
+  const bloqueos = [];
+  const partes = norm(texto.replace(/\r?\n/g, ' ; '))
+    .split(/;|\.(?:\s+|$)|,\s*(?=(?:y\s+)?(?:la|el|las|los|lo|oc|excepto|menos|pero|salvo|resto)\b)|\s+y\s+(?=(?:la|el|las|los|oc)\s)/);
+  let refsPendientes = [];
+  for (let p of partes) {
+    p = (p || '').trim(); if (!p) continue;
+    const refs = [];
+    // "el 2 de la 51420"
+    p = p.replace(/\b(?:el|la|item|linea|numero|#)\s*(\d{1,2})\s+de\s+(?:la\s+)?(?:oc\s*[-#]?\s*)?0*(\d{3,8})\b/g, (_, i, oc) => { refs.push({ oc, pos: +i }); return ' '; });
+    const f = extraerFecha(p); p = f.resto;
+    // números de OC o de ítem
+    p.replace(/\b(oc|orden)?\s*[-#]?\s*0*(\d{4,8})\b(?!\s*(?:und|unid|unidades|uds|kg|m|mts|metros|piezas|pzas)\b)/g, (_, pre, num) => {
+      if (ctx.ocsProveedor.has(num)) refs.push({ oc: num });
+      else if (ctx.itemsProveedor.has(num)) refs.push({ item: num });
+      else if (ctx.ocsOtros.has(num)) bloqueos.push('La OC ' + num + ' no es de ' + ctx.proveedor + ' (es de ' + ctx.ocsOtros.get(num) + ').');
+      else if (pre) bloqueos.push('La OC ' + num + ' no aparece en las OC abiertas de ' + ctx.proveedor + '.');
+      return ' ';
+    });
+    const entregado = /\b(entregamos|entregad[oa]s?|despachad[oa]s?|despachamos|ya\s+(?:\w+\s+)?llego|ya\s+(?:\w+\s+)?llegaron)\b/.test(p);
+    const resto = /\b(lo demas|el resto|resto|los demas|las demas)\b/.test(p);
+    const mantiene = !/\bno\b/.test(p) && /\b(todo igual|igual|ok|okay|se mantiene|se mantienen|si|confirmad[oa]s?|confirmamos|de acuerdo|correcto)\b/.test(p);
+    let accion = null;
+    if (entregado) accion = { tipo: 'entregado' };
+    else if (f.fecha) accion = { tipo: 'fecha', fecha: f.fecha };
+    else if (f.vaga || (/\bno\b/.test(p) && /\b(igual|mantiene|mantienen)\b/.test(p))) accion = { tipo: 'vaga' };
+    else if (mantiene) accion = { tipo: 'mantiene' };
+    if (!accion) { if (refs.length) refsPendientes = refsPendientes.concat(refs); continue; }
+    const usar = refs.length ? refs : refsPendientes; refsPendientes = [];
+    let destino = [];
+    if (!usar.length) destino = ctx.preguntadas;
+    for (const r of usar) {
+      if (r.pos) { const l = (ctx.porOC.get(r.oc) || [])[r.pos - 1]; if (l) destino.push(l); else bloqueos.push('La OC ' + r.oc + ' no tiene un ítem número ' + r.pos + ' en el último mensaje.'); }
+      else if (r.oc) destino = destino.concat(ctx.porOC.get(r.oc) || ctx.abiertas.filter(l => numOC(l.oc) === r.oc));
+      else if (r.item) destino = destino.concat(ctx.abiertas.filter(l => sinCeros(l.item) === r.item));
+    }
+    for (const l of destino) { if (resto && res.has(l.clave)) continue; res.set(l.clave, accion); }
+  }
+  return { res, bloqueos };
+}
+
+function leerRespuesta() {
+  const texto = $('pegado').value;
+  S.lectura = null;
+  const out = $('lectura'); out.innerHTML = '';
+  const bloquear = m => { out.innerHTML = '<div class="aviso rojo"></div>'; out.firstChild.textContent = m; };
+  if (!texto.trim()) return bloquear('El cuadro está vacío. Pegue lo que copió de WhatsApp Web.');
+  const msgs = separarMensajes(texto);
+  if (!msgs.length) return bloquear('No se ve el encabezado de WhatsApp Web ("[hora, fecha] Nombre:"). En WhatsApp Web seleccione los mensajes, cópielos con Ctrl+C y péguelos aquí.');
+  const provs = new Map();
+  for (const m of msgs) { const c = proveedorDeRemitente(m.remitente); if (c) { m.cfg = c; provs.set(c.proveedor, c); } }
+  if (!provs.size) return bloquear('Remitente desconocido: "' + msgs.map(m => m.remitente).filter((v, i, a) => a.indexOf(v) === i).join('", "') + '". Debe coincidir con el celular o el nombre_whatsapp de config/proveedores.xlsx.');
+  if (provs.size > 1) return bloquear('Hay mensajes de varios proveedores (' + [...provs.keys()].join(', ') + '). Pegue las respuestas de un proveedor a la vez.');
+  const cfg = [...provs.values()][0];
+  const abiertas = [...S.reg.lineas.values()].filter(l => norm(l.proveedor) === norm(cfg.proveedor) && l.estado !== 'CERRADA');
+  const envios = S.reg.historial.filter(h => h.tipo === 'ENVÍO' && norm(h.proveedor) === norm(cfg.proveedor)).sort((a, b) => a.id.localeCompare(b.id));
+  const ultimo = envios[envios.length - 1];
+  const corte = ultimo ? (ultimo.fecha + ' ' + ultimo.hora).slice(0, 16) : '';
+  const propios = msgs.filter(m => m.cfg && m.fecha >= corte);
+  if (!propios.length) return bloquear('No hay mensajes de ' + cfg.proveedor + ' posteriores al último envío (' + ddmmaaaa(corte) + ' ' + corte.slice(11) + ').');
+  let preguntadas = [];
+  if (ultimo) { try { preguntadas = JSON.parse(ultimo.claves).map(k => S.reg.lineas.get(k)).filter(l => l && l.estado !== 'CERRADA'); } catch (e) {} }
+  if (!preguntadas.length) preguntadas = abiertas.filter(l => S.alcance.has(l.clave));
+  const porOC = new Map(); for (const l of preguntadas) { const k = numOC(l.oc); if (!porOC.has(k)) porOC.set(k, []); porOC.get(k).push(l); }
+  const ocsProveedor = new Set(), ocsOtros = new Map();
+  for (const r of S.oc) { const k = numOC(r.orden); if (norm(r.proveedor) === norm(cfg.proveedor)) ocsProveedor.add(k); else if (!ocsOtros.has(k)) ocsOtros.set(k, r.proveedor); }
+  for (const l of abiertas) ocsProveedor.add(numOC(l.oc));
+  const itemsProveedor = new Set(abiertas.map(l => sinCeros(l.item)));
+  const original = propios.map(m => '[' + m.fecha + '] ' + m.remitente + ': ' + m.texto).join('\n');
+  const { res, bloqueos } = interpretar(propios.map(m => m.texto).join('\n'), { proveedor: cfg.proveedor, preguntadas, porOC, abiertas, ocsProveedor, ocsOtros, itemsProveedor });
+  if (bloqueos.length) return bloquear('BLOQUEADO: ' + bloqueos.join(' ') + ' Revise con el proveedor antes de registrar.');
+  const filas = [];
+  const vistas = new Set();
+  for (const l of preguntadas.concat([...res.keys()].map(k => S.reg.lineas.get(k)))) {
+    if (!l || vistas.has(l.clave)) continue; vistas.add(l.clave);
+    const a = res.get(l.clave);
+    let fila = { l, tipo: null, fecha: '' };
+    if (a && a.tipo === 'entregado') fila.tipo = 'entregado';
+    else if (a && a.tipo === 'fecha') { fila.tipo = 'fecha'; fila.fecha = a.fecha; }
+    else if (a && a.tipo === 'mantiene') { fila.tipo = 'fecha'; fila.fecha = l.fecha_prometida || requeridaEfectiva(l); fila.mantiene = true; }
+    else fila.tipo = 'duda';
+    filas.push(fila);
+  }
+  S.lectura = { cfg, filas, original };
+  pintarLectura();
+}
+function pintarLectura() {
+  const out = $('lectura'); out.innerHTML = '';
+  const L = S.lectura; if (!L) return;
+  const t = document.createElement('div'); t.className = 'provGrande'; t.textContent = L.cfg.proveedor; out.appendChild(t);
+  const tabla = document.createElement('table');
+  tabla.innerHTML = '<thead><tr><th>OC</th><th>Ítem</th><th>Fecha entendida</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  for (const f of L.filas) {
+    const tr = document.createElement('tr'); if (f.tipo === 'duda') tr.className = 'amarilla';
+    const td = (x) => { const d = document.createElement('td'); d.textContent = x; tr.appendChild(d); return d; };
+    td(numOC(f.l.oc)); td(f.l.item + ' · ' + String(f.l.descripcion).slice(0, 40));
+    if (f.tipo === 'duda') { const d = td(''); const i = document.createElement('input'); i.type = 'date'; i.onchange = () => { f.fecha = i.value; }; d.append('No se entendió → ', i); }
+    else if (f.tipo === 'entregado') td('ENTREGADO');
+    else td(ddmmaaaa(f.fecha) + (f.mantiene ? ' (se mantiene)' : ''));
+    tb.appendChild(tr);
+  }
+  tabla.appendChild(tb); out.appendChild(tabla);
+  const b = document.createElement('button'); b.className = 'principal'; b.textContent = 'Confirmar'; b.id = 'btnConfirmar'; b.style.marginTop = '12px';
+  b.onclick = confirmarLectura; out.appendChild(b);
+}
+async function confirmarLectura() {
+  const L = S.lectura; if (!L) return;
+  const t = ahora(); const tocadas = [];
+  historial('RESPUESTA', L.cfg.proveedor, L.filas.map(f => f.l.clave), L.original);
+  for (const f of L.filas) {
+    const l = f.l; const antes = l.estado + ' / ' + (l.fecha_prometida ? ddmmaaaa(l.fecha_prometida) : 'sin fecha');
+    if (f.tipo === 'entregado') { l.estado = 'ENTREGADO'; }
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(f.fecha)) { l.fecha_prometida = f.fecha; l.estado = f.fecha <= requeridaEfectiva(l) ? 'CONFIRMADO' : 'LLAMAR'; }
+    else continue;
+    l.envios = 0; l.ultima_respuesta = t; l.actualizado = t; tocadas.push(l.clave);
+    historial('CAMBIO', l.proveedor, [l.clave], 'Respuesta: ' + antes + ' → ' + l.estado + ' / ' + (l.fecha_prometida ? ddmmaaaa(l.fecha_prometida) : 'sin fecha'));
+  }
+  const ok = await guardar();
+  if (ok) { $('pegado').value = ''; S.lectura = null; $('lectura').innerHTML = '<div class="aviso info">Guardado: ' + tocadas.length + ' línea(s) de ' + L.cfg.proveedor.replace(/</g,'') + '.</div>'; }
+  pintar();
+}
+
+/* =====================================================================
+   PANTALLA
+   ===================================================================== */
+function pintarSelector() {
+  const lista = $('listaComp'); lista.innerHTML = '';
+  const sel = compradoresSeleccionados();
+  const nombres = [...new Set(S.config.map(c => c.comprador).filter(Boolean))].sort();
+  for (const n of nombres) {
+    const lab = document.createElement('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = sel.includes(n);
+    cb.onchange = () => { const s = new Set(compradoresSeleccionados()); cb.checked ? s.add(n) : s.delete(n); guardarSeleccion([...s].filter(x => nombres.includes(x))); pintar(); };
+    lab.append(cb, n); lista.appendChild(lab);
+  }
+  $('selTxt').textContent = sel.filter(x => nombres.includes(x)).join(', ') || '(seleccione)';
+}
+function pintar() {
+  pintarSelector();
+  $('fechas').innerHTML = '';
+  $('fechas').append('Explosión del ' + ddmmaaaa(S.expInfo.iso) + ' · OC del ' + ddmmaaaa(S.ocInfo.iso));
+  if (FECHA_SIMULADA) { const s = document.createElement('div'); s.id = 'fechaSimulada'; s.textContent = 'FECHA SIMULADA: ' + ddmmaaaa(FECHA_SIMULADA); $('fechas').appendChild(s); }
+  const env = $('envios'), lla = $('llamadas'); env.innerHTML = ''; lla.innerHTML = '';
+  if (!compradoresSeleccionados().length) {
+    env.innerHTML = lla.innerHTML = '<p class="vacio">Arriba, en "¿Quién eres?", marque su nombre.</p>'; return;
+  }
+  const grupos = envioDeHoy();
+  if (!grupos.length) env.innerHTML = '<p class="vacio">Nada por enviar hoy.</p>';
+  for (const g of grupos) {
+    const b = document.createElement('button'); b.className = 'grande';
+    const corto = (g.cfg.nombre_whatsapp || g.cfg.proveedor).split(' - ')[0];
+    b.textContent = 'Enviar a ' + corto + ' (' + g.lineas.length + (g.lineas.length === 1 ? ' línea)' : ' líneas)');
+    if (!telefono(g.cfg)) { b.disabled = true; b.textContent += ' — falta celular en config'; }
+    b.onclick = () => enviar(g, b); env.appendChild(b);
+  }
+  const ll = llamadasDeHoy();
+  if (!ll.length) { lla.innerHTML = '<p class="vacio">Nada por llamar hoy.</p>'; return; }
+  const tabla = document.createElement('table');
+  tabla.innerHTML = '<thead><tr><th>Proveedor</th><th>OC</th><th>Ítem</th><th>Motivo</th><th>Fecha acordada</th><th></th></tr></thead>';
+  const tb = document.createElement('tbody');
+  for (const l of ll) {
+    const tr = document.createElement('tr'); tr.className = 'llamar';
+    const td = x => { const d = document.createElement('td'); d.textContent = x; tr.appendChild(d); return d; };
+    const cfg = cfgProveedor(l.proveedor) || {};
+    td('LLAMAR a ' + l.proveedor + (cfg.celular ? ' · ' + cfg.celular : '') + (cfg.contacto ? ' (' + cfg.contacto + ')' : ''));
+    td(numOC(l.oc)); td(l.item + ' · ' + String(l.descripcion).slice(0, 35));
+    td(l.envios >= ENVIOS_ANTES_DE_LLAMAR ? 'Sin respuesta' : 'Fecha no sirve: prometió ' + fechaCorta(l.fecha_prometida) + ', se requiere ' + (requeridaEfectiva(l) === hoy() ? 'hoy' : fechaCorta(requeridaEfectiva(l))));
+    const i = document.createElement('input'); i.type = 'date'; td('').appendChild(i);
+    const b = document.createElement('button'); b.textContent = 'Guardar';
+    b.onclick = () => { if (!i.value) { i.focus(); return; } b.disabled = true; guardarAcordada(l, i.value); };
+    td('').appendChild(b);
+    tb.appendChild(tr);
+  }
+  tabla.appendChild(tb); lla.appendChild(tabla);
+}
+
+/* =====================================================================
+   ARRANQUE
+   ===================================================================== */
+async function cargar() {
+  S.avisos = []; pintarAvisos();
+  $('btnConectar').hidden = true;
+  try { await carpeta('entrada'); await carpeta('config'); }
+  catch (e) { avisar('Esta no es la carpeta de seguimiento: debe tener las subcarpetas "entrada" y "config".', 'rojo'); return mostrarConectar(true); }
+  try { S.config = await leerConfig(); }
+  catch (e) { return avisar('Falta o está dañado config/proveedores.xlsx. Avise al responsable de la configuración.', 'rojo'); }
+  let nombres = []; try { nombres = await listarArchivos('entrada'); } catch (e) {}
+  const oc = await elegirOC(nombres);
+  const ex = await elegirExplosion(nombres);
+  if (!oc.usado || !ex.usado) {
+    const falta = [!ex.usado && 'la explosión', !oc.usado && 'el listado de OC'].filter(Boolean).join(' y ');
+    return avisar('Avise al analista: falta ' + falta + ' (o los archivos de la carpeta entrada están dañados).', 'rojo');
+  }
+  S.oc = oc.filas; S.ocInfo = oc.usado; S.items = ex.items; S.expInfo = ex.usado;
+  S.reg = await leerRegistro();
+  await respaldoDiario();
+  let cambios = 0;
+  const reportar = (dan, usado, que, articulo, nueva) => {
+    if (!dan.length) return;
+    avisar('Se está usando ' + que + ' del ' + ddmm(usado.iso) + ' porque ' + articulo + ' ' + nueva + ' está dañad' + (articulo === 'la' ? 'a' : 'o') + '. Avise al analista para que la vuelva a exportar.', 'amarillo');
+    for (const d of dan) if (!S.reg.historial.some(h => h.tipo === 'AVISO ARCHIVO' && h.detalle.startsWith(d.nombre + ' '))) {
+      historial('AVISO ARCHIVO', '', null, d.nombre + ' dañado (' + d.motivo + '). Se usa ' + usado.nombre + '. El analista debe exportarlo de nuevo.'); cambios++;
+    }
+  };
+  reportar(ex.danados.filter(d => d.iso >= ex.usado.iso && d.nombre !== ex.usado.nombre), ex.usado, 'la explosión', 'la', 'nueva');
+  reportar(oc.danados.filter(d => d.iso >= oc.usado.iso && d.nombre !== oc.usado.nombre), oc.usado, 'el listado de OC', 'el', 'nuevo');
+  cambios += sincronizar();
+  if (cambios) await guardar();
+  $('cabecera').hidden = false; $('principal').hidden = false;
+  pintar();
+}
+function mostrarConectar(nuevo) {
+  const b = $('btnConectar'); b.hidden = false;
+  b.onclick = async () => {
+    try {
+      const guardada = nuevo ? null : await idbGet('raiz');
+      if (guardada && (await guardada.requestPermission({ mode: 'readwrite' })) === 'granted') RAIZ = guardada;
+      else { RAIZ = await window.showDirectoryPicker({ mode: 'readwrite' }); await idbSet('raiz', RAIZ); }
+      cargar();
+    } catch (e) { /* el usuario canceló */ }
+  };
+}
+async function iniciar() {
+  $('btnLeer').onclick = leerRespuesta;
+  if (typeof XLSX === 'undefined') return avisar('No cargó el lector de Excel (SheetJS). Revise la conexión a internet y recargue.', 'rojo');
+  if (window.__carpetaPrueba) { RAIZ = window.__carpetaPrueba; return cargar(); }
+  if (!window.showDirectoryPicker) return avisar('Abra este archivo en Microsoft Edge o Google Chrome.', 'rojo');
+  const h = await idbGet('raiz');
+  if (h && (await h.queryPermission({ mode: 'readwrite' })) === 'granted') { RAIZ = h; return cargar(); }
+  mostrarConectar(false);
+}
+document.addEventListener('click', e => { const d = $('selComp'); if (d.open && !d.contains(e.target)) d.open = false; });
+iniciar();
+</script>
+</body>
+</html>
